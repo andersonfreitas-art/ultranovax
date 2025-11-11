@@ -1,0 +1,8 @@
+[Unit]
+Description=Novation Ultranova MIDI Driver Bridge
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/midi_bridge
+Restart=always
+RestartSec=1

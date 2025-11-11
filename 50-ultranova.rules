@@ -1,0 +1,7 @@
+# Regra Udev para o Novation Ultranova
+#
+# 1. Dá permissão de usuário ao dispositivo (TAG+="uaccess")
+# 2. Informa ao systemd do usuário para iniciar o ultranova.service
+#    quando este dispositivo for conectado.
+#
+SUBSYSTEM=="usb", ATTR{idVendor}=="1235", ATTR{idProduct}=="0011", TAG+="uaccess", ENV{SYSTEMD_USER_WANTS}+="ultranova.service"
