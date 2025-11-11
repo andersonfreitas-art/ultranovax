@@ -1,8 +1,9 @@
 /**
  * Driver/Ponte MIDI de Usuário para Novation Ultranova (1235:0011)
  *
- * Este programa lê dados MIDI brutos do endpoint USB do Ultranova usando libusb
- * e os retransmite para uma porta MIDI virtual do ALSA.
+ * Versão 2.0 - Parser com Estado
+ * - Suporta Running Status
+ * - Suporta mensagens de 2 e 3 bytes (NoteOn/Off, CC, Pitch Bend, Prog Change, Aftertouch)
  *
  * Compilação:
  * gcc midi_bridge.c -o midi_bridge -lusb-1.0 -lasound
@@ -23,14 +24,17 @@
 snd_seq_t *seq_handle; // Handle para o sequenciador ALSA
 int alsa_port;         // ID da nossa porta MIDI virtual
 
-// --- Globais do Parser MIDI ---
-unsigned char midi_msg[3]; // Buffer para montar a mensagem MIDI (trata apenas de msgs de 3 bytes)
-int msg_pos = 0;           // Quantos bytes já recebemos para a msg atual
+// --- Globais do Parser MIDI (v2.0 - Máquina de Estado) ---
+static unsigned char running_status = 0; // O último comando MIDI (ex: 0x90)
+static unsigned char msg_buffer[3];      // Buffer para montar a mensagem
+static int bytes_to_expect = 0;          // Quantos bytes de DADOS ainda esperamos (0, 1 ou 2)
+static int msg_pos = 0;                  // Onde estamos no buffer
 
 /**
  * Inicializa o Sequenciador ALSA e cria nossa porta MIDI virtual
+ * (Esta é a função que estava faltando e causando o erro de 'linkagem')
  */
-int setup_alsa_midi() {
+int setup_alsa_midi(void) {
     // Abre o sequenciador ALSA
     if (snd_seq_open(&seq_handle, "default", SND_SEQ_OPEN_OUTPUT, 0) < 0) {
         fprintf(stderr, "Erro: Não foi possível abrir o sequenciador ALSA.\n");
@@ -58,77 +62,143 @@ int setup_alsa_midi() {
 }
 
 /**
- * Envia uma mensagem MIDI completa para o ALSA
- * (Versão inteligente que entende os eventos)
+ * Envia uma mensagem MIDI completa (2 ou 3 bytes) para o ALSA
  */
-void send_to_alsa(unsigned char b1, unsigned char b2, unsigned char b3) {
+void send_to_alsa(unsigned char* msg, int length) {
     snd_seq_event_t ev;
-    snd_seq_ev_clear(&ev); // Limpa o evento
+    snd_seq_ev_clear(&ev);
 
-    // Configura a origem (nossa porta) e o destino (qualquer um ouvindo)
     snd_seq_ev_set_source(&ev, alsa_port);
     snd_seq_ev_set_subs(&ev);
-    snd_seq_ev_set_direct(&ev); // Envia direto
+    snd_seq_ev_set_direct(&ev);
 
-    // --- A nova lógica inteligente ---
-    unsigned char command = b1 & 0xF0; // Pega o comando (ex: 0x90, 0x80, 0xB0)
-    unsigned char channel = b1 & 0x0F; // Pega o canal (0-15)
+    unsigned char command = msg[0] & 0xF0; // Ex: 0x90, 0xC0
+    unsigned char channel = msg[0] & 0x0F;
 
-    if (command == 0x90 && b3 > 0) {
-        // --- Note On ---
-        // (b3 > 0 porque Note On com velocidade 0 é um Note Off)
-        ev.type = SND_SEQ_EVENT_NOTEON;
-        ev.data.note.channel = channel;
-        ev.data.note.note = b2;
-        ev.data.note.velocity = b3;
-    } 
-    else if (command == 0x80 || (command == 0x90 && b3 == 0)) {
-        // --- Note Off ---
-        // (Tanto 0x80 quanto 0x90 com vel 0)
-        ev.type = SND_SEQ_EVENT_NOTEOFF;
-        ev.data.note.channel = channel;
-        ev.data.note.note = b2;
-        ev.data.note.velocity = 0; // Velocidade do Note Off
+    // Mensagens de 3 bytes
+    if (length == 3) {
+        if (command == 0x90 && msg[2] > 0) { // Note On
+            ev.type = SND_SEQ_EVENT_NOTEON;
+            ev.data.note.channel = channel;
+            ev.data.note.note = msg[1];
+            ev.data.note.velocity = msg[2];
+        } else if (command == 0x80 || (command == 0x90 && msg[2] == 0)) { // Note Off
+            ev.type = SND_SEQ_EVENT_NOTEOFF;
+            ev.data.note.channel = channel;
+            ev.data.note.note = msg[1];
+            ev.data.note.velocity = 0;
+        } else if (command == 0xB0) { // Control Change (CC)
+            ev.type = SND_SEQ_EVENT_CONTROLLER;
+            ev.data.control.channel = channel;
+            ev.data.control.param = msg[1];
+            ev.data.control.value = msg[2];
+        } else if (command == 0xE0) { // Pitch Bend (implementado!)
+            ev.type = SND_SEQ_EVENT_PITCHBEND;
+            ev.data.control.channel = channel;
+            // Pitch bend é 14 bits (2 bytes de dados)
+            ev.data.control.value = (msg[2] << 7) | msg[1]; 
+            // O valor do ALSA é de -8192 a 8191. O MIDI é 0-16383.
+            // Precisamos subtrair o "centro" (8192)
+            ev.data.control.value -= 8192;
+        } else {
+            return; // Ignora outras mensagens de 3 bytes por enquanto
+        }
     }
-    else if (command == 0xB0) {
-        // --- Control Change (CC) --- (Para seus Knobs!)
-        ev.type = SND_SEQ_EVENT_CONTROLLER;
-        ev.data.control.channel = channel;
-        ev.data.control.param = b2; // Número do CC
-        ev.data.control.value = b3; // Valor do CC
-    }
-    else {
-        // Outros eventos (Pitch Bend, etc.) que ainda não tratamos
-        // Por enquanto, não fazemos nada para evitar logs
-        return;
+    // Mensagens de 2 bytes
+    else if (length == 2) {
+        if (command == 0xC0) { // Program Change (implementado!)
+            ev.type = SND_SEQ_EVENT_PGMCHANGE;
+            ev.data.control.channel = channel;
+            ev.data.control.value = msg[1]; // Número do programa
+        } else if (command == 0xD0) { // Channel Aftertouch (implementado!)
+            ev.type = SND_SEQ_EVENT_CHANPRESS;
+            ev.data.control.channel = channel;
+            ev.data.control.value = msg[1]; // Valor da pressão
+        } else {
+            return; // Ignora outras mensagens de 2 bytes
+        }
+    } else {
+        return; // Ignora mensagens de tamanho inesperado
     }
 
-    // Envia o evento (agora estruturado corretamente)
+    // Envia o evento
     snd_seq_event_output(seq_handle, &ev);
-    snd_seq_drain_output(seq_handle); // Envia "agora"
+    snd_seq_drain_output(seq_handle);
 }
 
 /**
- * O Parser MIDI. Recebe bytes um por um e monta a mensagem.
- * Lida com pacotes USB fragmentados.
+ * O Parser MIDI v2.0 (Máquina de Estado).
+ * Lida com mensagens de 2 e 3 bytes e "Running Status".
  */
 void parse_midi_byte(unsigned char byte) {
-    // Byte de Status (começa com 1, ex: 0x91, 0x81)
-    if (byte & 0x80) {
-        msg_pos = 0; // Reinicia a montagem da mensagem
-        midi_msg[msg_pos++] = byte;
-    } 
-    // Byte de Dado (começa com 0) e estamos no meio de uma mensagem
-    else if (msg_pos > 0) {
-        midi_msg[msg_pos++] = byte;
-    }
+    int is_status_byte = (byte & 0x80); // O primeiro bit é 1?
 
-    // Se temos 3 bytes, a mensagem está completa!
-    // (Este é um parser simples que SÓ trata mensagens de 3 bytes)
-    if (msg_pos == 3) {
-        printf("ALSA <- MIDI: 0x%02X 0x%02X 0x%02X\n", midi_msg[0], midi_msg[1], midi_msg[2]);
-        send_to_alsa(midi_msg[0], midi_msg[1], midi_msg[2]);
-        msg_pos = 0; // Reseta para a próxima mensagem
+    if (is_status_byte) {
+        // --- É um Byte de Status (Novo Comando) ---
+        
+        // Ignora mensagens de "System Real-Time" (0xF8-0xFF)
+        if (byte >= 0xF8) {
+            return; 
+        }
+        
+        // (SysEx 0xF0 e 0xF7 serão ignorados por enquanto)
+
+        // Salva como o novo "Running Status"
+        running_status = byte;
+        msg_pos = 1; // Posição 0 já está preenchida
+        msg_buffer[0] = byte;
+
+        // Decide quantos bytes de DADOS esperar
+        unsigned char command = byte & 0xF0;
+        if (command == 0xC0 || command == 0xD0) {
+            bytes_to_expect = 1; // Espera 1 byte de dados (total 2)
+        } else if (command == 0x80 || command == 0x90 || command == 0xB0 || command == 0xE0) {
+            bytes_to_expect = 2; // Espera 2 bytes de dados (total 3)
+        } else {
+            // SysEx ou outros comandos que não tratamos
+            bytes_to_expect = 0; 
+            msg_pos = 0;
+            running_status = 0;
+        }
+
+    } else {
+        // --- É um Byte de Dados (Primeiro bit é 0) ---
+
+        // 1. Aplicar "Running Status"?
+        // Se recebemos um byte de DADOS, mas esperávamos um COMANDO (bytes_to_expect == 0)
+        // E temos um "running_status" salvo...
+        if (bytes_to_expect == 0 && running_status != 0) {
+            
+            // Reativa o "running status" como se o comando tivesse sido enviado
+            parse_midi_byte(running_status); 
+            
+            // E então, processa o byte atual novamente
+            parse_midi_byte(byte); 
+            return; // O processamento continua nas chamadas recursivas
+        }
+
+        // 2. Coletar dados
+        // Se estamos ativamente esperando por dados...
+        if (bytes_to_expect > 0) {
+            msg_buffer[msg_pos] = byte;
+            msg_pos++;
+            bytes_to_expect--;
+
+            // 3. Mensagem Completa?
+            if (bytes_to_expect == 0) {
+                // Mensagem pronta! (seja de 2 ou 3 bytes)
+                int total_length = msg_pos;
+                printf("ALSA <- MIDI: ");
+                for(int i=0; i<total_length; i++) printf("0x%02X ", msg_buffer[i]);
+                printf("\n");
+
+                send_to_alsa(msg_buffer, total_length);
+                
+                // Reseta para a próxima mensagem (mas mantém o running_status)
+                msg_pos = 0; 
+                // bytes_to_expect já é 0
+            }
+        }
     }
 }
 
@@ -157,7 +227,7 @@ void poll_usb(libusb_device_handle *handle) {
                 parse_midi_byte(buffer[i]);
             }
         } else if (r == LIBUSB_ERROR_TIMEOUT) {
-            // Timeout é normal, significa que não houve dados
+            // Timeout é normal, nada a fazer
         } else {
             // Erro real
             fprintf(stderr, "Erro na transferência USB: %s\n", libusb_error_name(r));
