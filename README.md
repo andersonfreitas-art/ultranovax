@@ -29,7 +29,7 @@ A instalação é automatizada com o `Makefile`.
 
 1.  **Clone este repositório:**
     ```bash
-    git clone [https://github.com/SEU-USUARIO/SEU-REPOSITORIO.git](https://github.com/SEU-USUARIO/SEU-REPOSITORIO.git)
+    git clone [https://github.com/andersonfreitas-art/ultranovax.git](https://github.com/andersonfreitas-art/ultranovax.git)
     cd SEU-REPOSITORIO
     ```
 
