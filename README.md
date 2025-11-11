@@ -29,8 +29,8 @@ A instalação é automatizada com o `Makefile`.
 
 1.  **Clone este repositório:**
     ```bash
-    git clone [https://github.com/andersonfreitas-art/ultranovax.git](https://github.com/andersonfreitas-art/ultranovax.git)
-    cd SEU-REPOSITORIO
+    git clone https://github.com/andersonfreitas-art/ultranovax.git
+    cd ultranovax
     ```
 
 2.  **Compile:**
